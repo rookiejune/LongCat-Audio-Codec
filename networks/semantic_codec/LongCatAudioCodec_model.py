@@ -404,6 +404,9 @@ class LongCatAudioCodecDecoder(nn.Module):
         self.decoder_dim = decoder_dim
         self.decoder_rates = decoder_rates
         self.decoder_type = decoder_type
+        self.latent_dim = latent_dim
+        self.semantic_dim = semantic_dim
+        self.total_input_dim = latent_dim + semantic_dim
         self.acoustic_codebook_size = codebook_size
         self.n_codebooks = n_codebooks
         
@@ -440,12 +443,107 @@ class LongCatAudioCodecDecoder(nn.Module):
         self.apply(init_weights)
 
 
+    def _nq(self, n_acoustic_codebooks: int = None) -> int:
+        if n_acoustic_codebooks is None:
+            return self.n_codebooks
+
+        if not 0 < n_acoustic_codebooks <= self.n_codebooks:
+            raise ValueError(
+                f"Requested n_acoustic_codebooks ({n_acoustic_codebooks}) is out of the valid range "
+                f"(1 to {self.n_codebooks})."
+            )
+        return n_acoustic_codebooks
+
+    def _semantic_latents(self, semantic_codes: torch.Tensor) -> torch.Tensor:
+        return self.semantic_dequantizer(semantic_codes).transpose(-1, -2)
+
+    def acoustic_codes_to_latents(self, acoustic_codes: torch.Tensor) -> torch.Tensor:
+        """Dequantize acoustic code indices to decoder-ready acoustic latents."""
+        if acoustic_codes.dim() != 3:
+            raise ValueError(
+                f"acoustic_codes must be a 3D tensor with shape [B, N_q, T], got {tuple(acoustic_codes.shape)}."
+            )
+        if acoustic_codes.is_floating_point():
+            raise TypeError("acoustic_codes must be an integer tensor.")
+        if not 0 < acoustic_codes.shape[1] <= self.n_codebooks:
+            raise ValueError(
+                f"acoustic_codes.shape[1] must be in [1, {self.n_codebooks}], got {acoustic_codes.shape[1]}."
+            )
+
+        acoustic_latents, _, _ = self.acoustic_quantizer.from_codes(acoustic_codes)
+        return acoustic_latents
+
+    def acoustic_latents_to_codes(self, acoustic_latents: torch.Tensor, n_acoustic_codebooks: int = None) -> torch.Tensor:
+        """Quantize decoder acoustic latents back to acoustic code indices."""
+        if acoustic_latents.dim() != 3:
+            raise ValueError(
+                f"acoustic_latents must be a 3D tensor with shape [B, D, T], got {tuple(acoustic_latents.shape)}."
+            )
+        if not acoustic_latents.is_floating_point():
+            raise TypeError("acoustic_latents must be a floating point tensor.")
+        if acoustic_latents.shape[1] != self.latent_dim:
+            raise ValueError(
+                f"acoustic_latents.shape[1] must be {self.latent_dim}, got {acoustic_latents.shape[1]}."
+            )
+
+        n_q = self._nq(n_acoustic_codebooks)
+        _, codes, _, _, _ = self.acoustic_quantizer(acoustic_latents, n_q)
+        return codes
+
+    def _acoustic_latents(self, acoustic: torch.Tensor) -> torch.Tensor:
+        if acoustic.dim() != 3:
+            raise ValueError(
+                f"acoustic must be a 3D tensor, got {tuple(acoustic.shape)}."
+            )
+
+        n = acoustic.shape[1]
+        is_codes = 0 < n <= self.n_codebooks
+        is_latents = n == self.latent_dim
+
+        if is_codes and is_latents:
+            if acoustic.is_floating_point():
+                return acoustic
+            raise ValueError(
+                f"Ambiguous acoustic shape {tuple(acoustic.shape)}. "
+                "Pass acoustic latents as floating point tensors or call acoustic_codes_to_latents first."
+            )
+
+        if is_latents:
+            return acoustic
+        if is_codes:
+            return self.acoustic_codes_to_latents(acoustic)
+
+        raise ValueError(
+            f"Cannot infer acoustic input type from shape {tuple(acoustic.shape)}. "
+            f"Expected [B, N_q, T] with N_q <= {self.n_codebooks} or [B, {self.latent_dim}, T]."
+        )
+
+    def _merge_latents(self, semantic_codes: torch.Tensor, acoustic: torch.Tensor = None) -> torch.Tensor:
+        semantic_latents = self._semantic_latents(semantic_codes)
+
+        if acoustic is None:
+            return semantic_latents
+
+        acoustic_latents = self._acoustic_latents(acoustic)
+        min_len = min(semantic_latents.shape[-1], acoustic_latents.shape[-1])
+        return torch.cat(
+            (semantic_latents[..., :min_len], acoustic_latents[..., :min_len]),
+            dim=1,
+        )
+
+    def decode(self, semantic_codes: torch.Tensor, acoustic: torch.Tensor = None) -> torch.Tensor:
+        """
+        Decode semantic codes with optional acoustic codes or acoustic latents.
+
+        The acoustic input is inferred by shape: [B, N_q, T] is treated as codes,
+        while [B, latent_dim, T] is treated as latents and fed to the decoder directly.
+        """
+        latents = self._merge_latents(semantic_codes, acoustic)
+        return self.decoder(latents)
+
     def forward(self, semantic_codes: torch.Tensor, acoustic_codes: torch.Tensor) -> torch.Tensor:
         """
-        Decodes semantic and acoustic tokens into an audio waveform.
-
-        This method first dequantizes the input tokens to get continuous latents,
-        concatenates them, and then feeds the result to a waveform generator.
+        Preserve the original module entry point.
 
         Parameters
         ----------
@@ -459,26 +557,7 @@ class LongCatAudioCodecDecoder(nn.Module):
         torch.Tensor
             The reconstructed audio waveform of shape [B, 1, T_audio].
         """
-        # Dequantize semantic tokens to get continuous latent features.
-        semantic_latents = self.semantic_dequantizer(semantic_codes)
-        
-        if self.acoustic_codebook_size != 0 and acoustic_codes is not None:
-            # Dequantize acoustic tokens using the internal RVQ's codebooks.
-            assert 0 < acoustic_codes.shape[1] <= self.n_codebooks, \
-                   f"The acoustic codes is encoded in {acoustic_codes.shape[1]} acoustic codebook, but the decoder only supply at most {self.n_codebooks} acoustic codebook"
-            acoustic_latents, _, _ = self.acoustic_quantizer.from_codes(acoustic_codes)
-            
-            # Align features by truncating to the minimum length before concatenation.
-            min_len = min(semantic_latents.shape[1], acoustic_latents.shape[-1])
-            latents = torch.cat((semantic_latents.transpose(-1, -2)[..., :min_len], acoustic_latents[..., :min_len]), dim=1)
-        else:
-            # If no acoustic path, use only semantic latents.
-            latents = semantic_latents.transpose(-1, -2)
-            
-        # Generate waveform from the combined latent representation.
-        quantized_audio = self.decoder(latents)
-
-        return quantized_audio
+        return self.decode(semantic_codes, acoustic_codes)
 
 
     def forward_stream(self, semantic_codes: torch.Tensor, acoustic_codes: torch.Tensor, list1_h_input: torch.Tensor, list1_c_input: torch.Tensor, list2_h_input: torch.Tensor, list2_c_input: torch.Tensor, lstm_buffer_input: torch.Tensor) -> torch.Tensor:
@@ -493,8 +572,8 @@ class LongCatAudioCodecDecoder(nn.Module):
         ----------
         semantic_codes : torch.Tensor, shape [B, T_codes]
             The discrete semantic tokens.
-        acoustic_codes : torch.Tensor, shape [B, N_q, T_codes]
-            The discrete acoustic tokens from the residual vector quantizer.
+        acoustic_codes : torch.Tensor, shape [B, N_q, T_codes] or [B, D, T_codes]
+            Acoustic codes or decoder acoustic latents.
         list1_h_input : torch.Tensor
             Previous hidden state for first LSTM memory layer
         list1_c_input : torch.Tensor  
@@ -517,22 +596,8 @@ class LongCatAudioCodecDecoder(nn.Module):
             - list2_c: Updated cell state for second LSTM memory layer
             - lstm_buffer: Updated LSTM buffer for next iteration
         """
-        # Dequantize semantic tokens to get continuous latent features.
-        semantic_latents = self.semantic_dequantizer(semantic_codes)
-        
-        if self.acoustic_codebook_size != 0 and acoustic_codes is not None:
-            # Dequantize acoustic tokens using the internal RVQ's codebooks.
-            assert 0 < acoustic_codes.shape[1] <= self.n_codebooks, \
-                   f"The acoustic codes is encoded in {acoustic_codes.shape[1]} acoustic codebook, but the decoder only supply at most {self.n_codebooks} acoustic codebook"
-            acoustic_latents, _, _ = self.acoustic_quantizer.from_codes(acoustic_codes)
-            
-            # Align features by truncating to the minimum length before concatenation.
-            min_len = min(semantic_latents.shape[1], acoustic_latents.shape[-1])
-            latents = torch.cat((semantic_latents.transpose(-1, -2)[..., :min_len], acoustic_latents[..., :min_len]), dim=1)
-        else:
-            # If no acoustic path, use only semantic latents.
-            latents = semantic_latents.transpose(-1, -2)
-            
+        latents = self._merge_latents(semantic_codes, acoustic_codes)
+
         # Generate waveform from the combined latent representation in streaming mode
         quantized_audio_slice, list1_h, list1_c, list2_h, list2_c, lstm_buffer = self.decoder.forward_stream(
             latents, list1_h_input, list1_c_input, list2_h_input, list2_c_input, lstm_buffer_input
