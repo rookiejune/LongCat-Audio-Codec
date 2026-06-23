@@ -10,6 +10,7 @@ import torch
 from torch import nn, Tensor
 
 
+from longcat_audio_codec.paths import resolve_checkpoint_path, resolve_resource_path
 
 from semantic_tokenizer_general.feature_extractor import FeatureExtractor, generate_padding_mask
 
@@ -375,9 +376,10 @@ class WavToLabel(nn.Module):
         model_config = semantic_tokenizer_config['model_config']
         sr = semantic_tokenizer_config['sample_rate']
 
-        with open(model_config) as f:
+        with open(resolve_resource_path(model_config)) as f:
             config = yaml.safe_load(f.read())
 
+        config["feature"]["cmvn_file"] = resolve_checkpoint_path(config["feature"]["cmvn_file"])
         self.feature_extractor = FeatureExtractor(config["feature"])
         self.model = build_model(config['encoder'])
 

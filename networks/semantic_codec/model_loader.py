@@ -2,6 +2,7 @@ import os
 import torch
 from typing import Dict
 import yaml
+from longcat_audio_codec.paths import resolve_checkpoint_path
 from networks.semantic_codec.LongCatAudioCodec_model import LongCatAudioCodecEncoder, LongCatAudioCodecDecoder
 
 
@@ -55,7 +56,7 @@ def load_encoder(config_path: str, device: torch.device) -> LongCatAudioCodecEnc
 
     config = load_yaml_config(config_path)
     args = config['codec_config']
-    ckpt_path = args['ckpt_path']
+    ckpt_path = resolve_checkpoint_path(args['ckpt_path'])
     
     # Initialize the Encoder model
     model = LongCatAudioCodecEncoder(
@@ -105,7 +106,7 @@ def load_decoder(config_path: str, device: torch.device) -> LongCatAudioCodecDec
 
     config = load_yaml_config(config_path)
     args = config['codec_config']
-    ckpt_path = args['ckpt_path']
+    ckpt_path = resolve_checkpoint_path(args['ckpt_path'])
         
     # Initialize the Decoder model
     model = LongCatAudioCodecDecoder(

@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "longcat-audio-codec"
+version = "0.1.0"
+description = "Installable package wrapper for LongCat-Audio-Codec."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+dependencies = [
+    "einops>=0.8.1",
+    "numpy",
+    "PyYAML>=6.0.2",
+    "soundfile>=0.13.1",
+    "torch",
+    "torchaudio",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "longcat_audio_codec*",
+    "networks*",
+    "semantic_tokenizer_general*",
+]
+exclude = [
+    "ckpts*",
+    "demos*",
+    "images*",
+]
+
+[tool.setuptools.package-data]
+"longcat_audio_codec" = ["configs/*.yaml"]
+"semantic_tokenizer_general" = ["configs/*.yaml"]
+
