@@ -118,6 +118,8 @@ LongCat-Audio-Codec/			 <-- Project Root
 
 If you prefer to store your models in a different location, you must update their paths in the corresponding .yaml configuration files. This is a more advanced option for users who want full control over their file structure.
 
+When the installed package runs with `HF_HOME` set, relative checkpoint paths such as `ckpts/LongCatAudioCodec_encoder.pt` are resolved from the Hugging Face Hub cache for `meituan-longcat/LongCat-Audio-Codec` under that `HF_HOME`.
+
 You will need to edit files in two main locations to relocate LongCat-Audio-Codec model:
 
 - To relocate a **LongCat-Audio-Codec model**, change `configs/LongCatAudioCodec_xxx.yaml` like this:

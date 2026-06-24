@@ -1,6 +1,6 @@
 from .paths import (
-    CACHE_ENV,
     CKPT_DIR_ENV,
+    HF_HOME_ENV,
     checkpoint_dir_from_env,
     resolve_checkpoint_path,
     resolve_resource_path,
@@ -26,8 +26,8 @@ def load_encoder(config_path, device):
 
 
 __all__ = [
-    "CACHE_ENV",
     "CKPT_DIR_ENV",
+    "HF_HOME_ENV",
     "checkpoint_dir_from_env",
     "default_config_path",
     "load_decoder",
