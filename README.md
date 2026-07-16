@@ -62,15 +62,22 @@ LongCat-Audio-Codec is an audio tokenizer and detokenizer solution designed for 
 **Note:** The torch version listed in below is just an example. Please install the version of PyTorch that matches your specific hardware configuration
 
 ```
-conda create -n LongCat-Audio-Codec python=3.10
+conda create -n LongCat-Audio-Codec python=3.9
 conda activate LongCat-Audio-Codec
-pip install torch==2.7.1 torchaudio==2.7.1
+pip install torch==2.8.0 torchaudio==2.8.0
 ```
 
-#### 2. Other dependencies:
+Python 3.9 and newer are supported. To check package imports, runtime type hints,
+and synthetic checkpoint loading without downloading model weights, run:
 
 ```
-pip install -r requirements.txt
+python -m unittest discover -s tests -v
+```
+
+#### 2. Install the package and dependencies:
+
+```
+pip install .
 ```
 
 ### 📦Model Preparation

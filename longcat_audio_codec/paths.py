@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from importlib.resources import files
 from pathlib import Path
+from typing import Optional, Union
 
 CKPT_DIR_ENV = "LONGCAT_AUDIO_CODEC_CKPT_DIR"
 HF_HOME_ENV = "HF_HOME"
@@ -29,7 +30,7 @@ def _hf_checkpoint_dir(hf_home: Path) -> Path:
     )
 
 
-def checkpoint_dir_from_env() -> Path | None:
+def checkpoint_dir_from_env() -> Optional[Path]:
     ckpt_dir = os.environ.get(CKPT_DIR_ENV)
     if ckpt_dir:
         return Path(ckpt_dir).expanduser()
@@ -41,7 +42,7 @@ def checkpoint_dir_from_env() -> Path | None:
     return None
 
 
-def resolve_checkpoint_path(path: str | os.PathLike[str]) -> str:
+def resolve_checkpoint_path(path: Union[str, os.PathLike[str]]) -> str:
     raw = Path(path).expanduser()
     if raw.is_absolute():
         return str(raw)
@@ -53,7 +54,7 @@ def resolve_checkpoint_path(path: str | os.PathLike[str]) -> str:
     return str(raw)
 
 
-def resolve_resource_path(path: str | os.PathLike[str]) -> str:
+def resolve_resource_path(path: Union[str, os.PathLike[str]]) -> str:
     raw = Path(path).expanduser()
     if raw.is_absolute() or raw.exists():
         return str(raw)

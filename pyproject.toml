@@ -7,7 +7,7 @@ name = "longcat-audio-codec"
 version = "0.1.0"
 description = "Installable package wrapper for LongCat-Audio-Codec."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
 dependencies = [
     "einops>=0.8.1",
