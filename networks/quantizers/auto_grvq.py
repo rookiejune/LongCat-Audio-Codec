@@ -1,3 +1,4 @@
+from math import isfinite
 from typing import Union
 
 import numpy as np
@@ -132,6 +133,7 @@ class AutoGroupResidualVectorQuantize(nn.Module):
         codebook_size: int = 1024,
         codebook_dim: Union[int, list] = 8,
         quantizer_dropout: float = 0.0,
+        null_acoustic_probability: float = 0.0,
         frame_residual_vq: bool = False,
     ):
         super().__init__()
@@ -141,14 +143,40 @@ class AutoGroupResidualVectorQuantize(nn.Module):
         self.n_codebooks = n_codebooks
         self.codebook_dim = codebook_dim
         self.codebook_size = codebook_size
+        if (
+            isinstance(quantizer_dropout, bool)
+            or not isinstance(quantizer_dropout, (int, float))
+            or not isfinite(float(quantizer_dropout))
+            or not 0.0 <= float(quantizer_dropout) <= 1.0
+        ):
+            raise ValueError("quantizer_dropout must be a finite value in [0, 1].")
+        if (
+            isinstance(null_acoustic_probability, bool)
+            or not isinstance(null_acoustic_probability, (int, float))
+            or not isfinite(float(null_acoustic_probability))
+            or not 0.0 <= float(null_acoustic_probability) <= 1.0
+        ):
+            raise ValueError("null_acoustic_probability must be a finite value in [0, 1].")
+        if float(quantizer_dropout) + float(null_acoustic_probability) > 1.0:
+            raise ValueError(
+                "quantizer_dropout + null_acoustic_probability must be at most 1."
+            )
 
-        self.quantizers = nn.ModuleList([
-            AutoGroupVectorQuantize(input_dim, codebook_size, codebook_dim[i], frame_residual_vq=frame_residual_vq)
-            for i in range(n_codebooks)
-        ])
-        self.quantizer_dropout = quantizer_dropout
+        self.quantizers = nn.ModuleList(
+            [
+                AutoGroupVectorQuantize(
+                    input_dim,
+                    codebook_size,
+                    codebook_dim[i],
+                    frame_residual_vq=frame_residual_vq,
+                )
+                for i in range(n_codebooks)
+            ]
+        )
+        self.quantizer_dropout = float(quantizer_dropout)
+        self.null_acoustic_probability = float(null_acoustic_probability)
 
-    def forward(self, z, n_quantizers: int = None):
+    def forward(self, z, n_quantizers: int = None, return_active_codebooks: bool = False):
         """Quantized the input tensor using a fixed set of `n` codebooks and returns
         the corresponding codebook vectors
         Parameters
@@ -187,21 +215,61 @@ class AutoGroupResidualVectorQuantize(nn.Module):
 
         if n_quantizers is None:
             n_quantizers = self.n_codebooks
-        if self.training:
-            n_quantizers = torch.ones((z.shape[0],)) * self.n_codebooks + 1
-            dropout = torch.randint(1, self.n_codebooks + 1, (z.shape[0],))
-            n_dropout = int(z.shape[0] * self.quantizer_dropout)
-            n_quantizers[:n_dropout] = dropout[:n_dropout]
-            n_quantizers = n_quantizers.to(z.device)
+        if self.training and (
+            self.quantizer_dropout > 0.0 or self.null_acoustic_probability > 0.0
+        ):
+            active = torch.full(
+                (z.shape[0],),
+                self.n_codebooks,
+                dtype=torch.long,
+                device=z.device,
+            )
+            order = torch.randperm(z.shape[0], device=z.device)
+            null_count = int(z.shape[0] * self.null_acoustic_probability)
+            dropout_count = int(z.shape[0] * self.quantizer_dropout)
+            null = order[:null_count]
+            dropout = order[null_count : null_count + dropout_count]
+            if dropout_count:
+                active[dropout] = torch.randint(
+                    1,
+                    self.n_codebooks + 1,
+                    (dropout_count,),
+                    device=z.device,
+                )
+            active[null] = 0
+            n_quantizers = active
+        elif isinstance(n_quantizers, int):
+            if not 0 <= n_quantizers <= self.n_codebooks:
+                raise ValueError(
+                    f"n_quantizers must be in [0, {self.n_codebooks}], got {n_quantizers}."
+                )
+            n_quantizers = torch.full(
+                (z.shape[0],),
+                n_quantizers,
+                dtype=torch.long,
+                device=z.device,
+            )
+        elif not isinstance(n_quantizers, torch.Tensor):
+            raise TypeError("n_quantizers must be an integer or an integer Tensor.")
+
+        active_codebooks = n_quantizers.to(device=z.device, dtype=torch.long)
+        if active_codebooks.ndim != 1 or active_codebooks.shape[0] != z.shape[0]:
+            raise ValueError("n_quantizers must have shape [batch].")
+        if bool((active_codebooks < 0).any()) or bool(
+            (active_codebooks > self.n_codebooks).any()
+        ):
+            raise ValueError(
+                f"n_quantizers must be in [0, {self.n_codebooks}] for every sample."
+            )
 
         for i, quantizer in enumerate(self.quantizers):
-            if self.training is False and i >= n_quantizers:
+            if self.training is False and bool((active_codebooks <= i).all()):
                 break
 
             z_q_i, commitment_loss_i, codebook_loss_i, indices_i, z_e_i = quantizer(residual)
 
             # Create mask to apply quantizer dropout
-            mask = (torch.full((z.shape[0],), fill_value=i, device=z.device) < n_quantizers)
+            mask = active_codebooks > i
             z_q = z_q + z_q_i * mask[:, None, None]
             residual = residual - z_q_i
 
@@ -212,10 +280,29 @@ class AutoGroupResidualVectorQuantize(nn.Module):
             codebook_indices.append(indices_i)
             latents.append(z_e_i)
 
-        codes = torch.stack(codebook_indices, dim=1)
-        latents = torch.cat(latents, dim=1)
+        if not codebook_indices:
+            codes = torch.empty(
+                z.shape[0],
+                0,
+                z.shape[-1],
+                dtype=torch.long,
+                device=z.device,
+            )
+            latents = torch.empty(
+                z.shape[0],
+                0,
+                z.shape[-1],
+                dtype=z.dtype,
+                device=z.device,
+            )
+        else:
+            codes = torch.stack(codebook_indices, dim=1)
+            latents = torch.cat(latents, dim=1)
 
-        return z_q, codes, latents, commitment_loss, codebook_loss
+        output = z_q, codes, latents, commitment_loss, codebook_loss
+        if return_active_codebooks:
+            return (*output, active_codebooks)
+        return output
 
     def from_codes(self, codes: torch.Tensor):
         """Given the quantized codes, reconstruct the continuous representation

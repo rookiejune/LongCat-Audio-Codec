@@ -9,6 +9,7 @@ codec_config:
   semantic_tokenizer_type: 'LongCatAudioCodec_semantic_tokenizer'
   semantic_token_nums: 8192
   semantic_dim: 1280
+  quantizer_dropout: 0.0
+  null_acoustic_probability: 0.0
 
   ckpt_path: 'ckpts/LongCatAudioCodec_encoder.pt'
-
