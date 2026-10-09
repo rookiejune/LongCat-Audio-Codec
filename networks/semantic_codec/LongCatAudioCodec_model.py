@@ -1,5 +1,5 @@
 import math
-from typing import List, Union, Tuple
+from typing import List, NamedTuple, Union, Tuple
 
 import numpy as np
 
@@ -45,6 +45,18 @@ class SingleTokenDequantizer(nn.Module):
         return self.dequant(x)
 
 
+class LongCatAudioCodecTrainingOutput(NamedTuple):
+    """Differentiable encoder outputs used by joint codec training."""
+
+    semantic_codes: torch.Tensor
+    acoustic_codes: torch.Tensor
+    acoustic_latents: torch.Tensor
+    projected_latents: torch.Tensor
+    commitment_loss: torch.Tensor
+    codebook_loss: torch.Tensor
+    active_codebooks: torch.Tensor
+
+
 class LongCatAudioCodecEncoder(nn.Module):
     """
     LongCatAudioCodecEncoder.
@@ -73,6 +85,8 @@ class LongCatAudioCodecEncoder(nn.Module):
         codebook_dim: Union[int, list] = 8,
         input_sample_rate: int = 16000,
         semantic_tokenizer_type: str = 'LongCat_semantic_tokenizer',
+        quantizer_dropout: float = 0.0,
+        null_acoustic_probability: float = 0.0,
     ):
         """
         Initializes the LongCatAudioCodec_encoder.
@@ -119,7 +133,9 @@ class LongCatAudioCodecEncoder(nn.Module):
             n_codebooks=n_codebooks,
             codebook_size=codebook_size,
             codebook_dim=codebook_dim,
-            frame_residual_vq=False
+            frame_residual_vq=False,
+            quantizer_dropout=quantizer_dropout,
+            null_acoustic_probability=null_acoustic_probability,
         )
         if self.acoustic_codebook_size == 0:
             latent_dim = 0 # If codebook_size is 0, the acoustic path provides no information
@@ -137,6 +153,13 @@ class LongCatAudioCodecEncoder(nn.Module):
         # This part loads a pre-trained model for semantic tokenization.
         self.semantic_tokenizer = WavToLabel(semantic_tokenizer_type=semantic_tokenizer_type).eval()
         print('Finished loading semantic tokenizer.')
+
+    def train(self, mode: bool = True):
+        """Train the acoustic path while keeping the semantic teacher frozen."""
+
+        super().train(mode)
+        self.semantic_tokenizer.eval()
+        return self
 
     def preprocess(self, audio_data: torch.Tensor, sample_rate: int) -> torch.Tensor:
         """
@@ -352,6 +375,44 @@ class LongCatAudioCodecEncoder(nn.Module):
         """
         return self.semantic_tokenizer.get_codebook()
 
+    def forward_training(
+        self,
+        audio_data: torch.Tensor,
+        sample_rate: int = None,
+    ) -> LongCatAudioCodecTrainingOutput:
+        """Encode audio while retaining differentiable acoustic latents.
+
+        The semantic path remains a frozen discrete target.  The acoustic
+        path returns the straight-through RVQ latent after per-sample prefix
+        dropout, including an all-zero latent when no codebook is active.
+        """
+
+        assert audio_data.dim() == 3 and audio_data.shape[1] == 1, \
+            "Input audio_data must be a 3D tensor of shape [B, 1, T]."
+        audio_data = self.preprocess(audio_data, sample_rate)
+        semantic_codes = self.get_semantic_codes(audio_data)
+        acoustic_input = self.encoder(audio_data)
+        (
+            acoustic_latents,
+            acoustic_codes,
+            projected_latents,
+            commitment_loss,
+            codebook_loss,
+            active_codebooks,
+        ) = self.acoustic_quantizer(
+            acoustic_input,
+            return_active_codebooks=True,
+        )
+        return LongCatAudioCodecTrainingOutput(
+            semantic_codes,
+            acoustic_codes,
+            acoustic_latents,
+            projected_latents,
+            commitment_loss,
+            codebook_loss,
+            active_codebooks,
+        )
+
 
 class LongCatAudioCodecDecoder(nn.Module):
     """
@@ -522,7 +583,12 @@ class LongCatAudioCodecDecoder(nn.Module):
         semantic_latents = self._semantic_latents(semantic_codes)
 
         if acoustic is None:
-            return semantic_latents
+            acoustic_latents = semantic_latents.new_zeros(
+                semantic_latents.size(0),
+                self.latent_dim,
+                semantic_latents.size(-1),
+            )
+            return torch.cat((semantic_latents, acoustic_latents), dim=1)
 
         acoustic_latents = self._acoustic_latents(acoustic)
         min_len = min(semantic_latents.shape[-1], acoustic_latents.shape[-1])

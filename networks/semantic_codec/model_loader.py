@@ -68,6 +68,8 @@ def load_encoder(config_path: str, device: torch.device) -> LongCatAudioCodecEnc
         codebook_dim=args['codec_codebook_search_dim'],
         input_sample_rate=args['input_sample_rate'],
         semantic_tokenizer_type=args['semantic_tokenizer_type'],
+        quantizer_dropout=args.get('quantizer_dropout', 0.0),
+        null_acoustic_probability=args.get('null_acoustic_probability', 0.0),
     ).to(device)
     
     # Load pretrained weights
